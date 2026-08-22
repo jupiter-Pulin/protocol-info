@@ -1,0 +1,27 @@
+{
+  "name": "labrinyang",
+  "owner": {
+    "name": "labrinyang",
+    "email": "zhiweiy9125@gmail.com"
+  },
+  "metadata": {
+    "description": "labrinyang's Claude Code plugins (currently: protocol-info for DeFi EarnProtocolInfo crawl/edit workflows, i18n exports, logo assets, and local history)."
+  },
+  "plugins": [
+    {
+      "name": "protocol-info",
+      "source": "./",
+      "version": "2.4.8",
+      "description": "Crawl and maintain DeFi EarnProtocolInfo records with schema validation, i18n exports, logo asset rehosting, and local git history",
+      "author": {
+        "name": "labrinyang",
+        "email": "zhiweiy9125@gmail.com"
+      },
+      "homepage": "https://github.com/labrinyang/protocol-info#readme",
+      "repository": "https://github.com/labrinyang/protocol-info",
+      "license": "MIT",
+      "keywords": ["defi", "protocol-info", "earn", "crawler", "i18n"],
+      "category": "research"
+    }
+  ]
+}

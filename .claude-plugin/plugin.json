@@ -1,0 +1,23 @@
+{
+  "name": "protocol-info",
+  "version": "2.4.8",
+  "description": "Crawl and maintain DeFi EarnProtocolInfo records with schema validation, i18n exports, logo asset rehosting, and local git history",
+  "author": {
+    "name": "labrinyang",
+    "email": "zhiweiy9125@gmail.com",
+    "url": "https://github.com/labrinyang"
+  },
+  "homepage": "https://github.com/labrinyang/protocol-info#readme",
+  "repository": "https://github.com/labrinyang/protocol-info",
+  "license": "MIT",
+  "keywords": [
+    "defi",
+    "protocol-info",
+    "earn",
+    "crawler",
+    "claude-code",
+    "rootdata",
+    "i18n",
+    "translation"
+  ]
+}

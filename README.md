@@ -1,152 +1,738 @@
-# protocol-info crawler
+# protocol-info
 
-通过 `claude -p` 无头模式抓取 `EarnProtocolInfo` JSON 记录。配置 RootData API 密钥后，
-管线会运行第二轮对账（Round 2），使用结构化 API 数据提升准确性。输出经人工审核后通过
-`earn-protocol-info.controller.ts` CRUD 端点导入 dashboard MongoDB。
+English | [简体中文](README.zh-CN.md)
 
-## 目录结构
+`protocol-info` is a Claude Code plugin and standalone CLI for researching DeFi earn/yield/staking protocols and producing schema-validated `EarnProtocolInfo` JSON.
 
-```
-script/protocol-info/
-├── run.sh                                 # 主驱动脚本（Round 1 + 可选 Round 2 + 可选翻译）
-├── translate.mjs                          # i18n 翻译（并发 claude -p haiku）
-├── preprocess-rootdata.mjs                # RootData API 客户端 + 成员评分
-├── extract-json.mjs                       # 从文本中提取 JSON
-├── validate.mjs                           # 零依赖 schema 校验器
-├── .env.example                           # API 密钥模板
-├── prompts/
-│   ├── system.md                          # Round 1 系统提示词
-│   ├── user.md.tmpl                       # Round 1 每个 provider 的模板
-│   ├── reconcile.md.tmpl                  # Round 2 对账模板
-│   └── translate-system.md                # 翻译系统提示词模板
-├── schema/
-│   └── earn-protocol-info.schema.json     # JSON Schema（含可选 locale 字段）
-├── test/                                  # 单元测试 + 集成测试
-│   ├── run-tests.sh                       # 测试运行器
-│   └── test-*.mjs                         # 各项测试用例
-└── out/
-    └── <YYYYMMDDTHHMMSSZ>/
-        ├── <slug>.json                    # 英文源记录（含 locale:"en"）
-        ├── <slug>.<locale>.json           # 翻译后的记录（如 slug.zh-cn.json）
-        └── .logs/                         # 调试日志（不需要导入）
-            ├── summary.tsv
-            ├── <slug>.raw.json
-            ├── <slug>.r2.raw.json
-            ├── <slug>.rootdata-packet.json
-            ├── <slug>.sidecar.json
-            ├── <slug>.stderr.log
-            └── <slug>.translate-summary.tsv
-```
+It runs Claude in headless mode, gathers structured evidence from optional fetchers such as RootData and DeFiLlama, reconciles field-level evidence, validates the final record against JSON Schema, rehosts protocol/member/auditor logos into stable output folders, and can optionally translate selected fields with Claude Haiku or an OpenAI-compatible gateway for 20 translated locales.
 
-## 前置依赖
+The output is intended for human review first, then import into the dashboard through the `earn-protocol-info` import endpoint.
 
-| 工具                       | 用途                                     |
-| -------------------------- | ---------------------------------------- |
-| `claude` CLI (Claude Code) | 无头 LLM 调用                            |
-| `jq`                       | `run.sh` 中的 JSON 模板渲染              |
-| `node` (≥ 18)              | `validate.mjs`, `preprocess-rootdata.mjs` |
+By default, generated artifacts are written to `out/` under the current working
+directory where the command is invoked. Plugin updates do not move the output
+root because it is not tied to the plugin cache path.
 
-## 初始设置
+Current release: `2.4.8`.
+
+## 2.4 Highlights
+
+- Live out browser is the primary review UI. It reads `out/` directly, so
+  updates to `out/<slug>/record.json` appear without rebuilding static HTML.
+- RootData accepts multiple API keys and rotates/falls back across the pool
+  during concurrent batches.
+- Provider, member, and auditor logos are downloaded into upload-ready folders
+  and rewritten to OneKey CDN URLs.
+- Audit report URLs are fetched before R2; PDF/HTML text can be read by an
+  OpenAI-compatible LLM via `AUDIT_REPORTS_LLM_PROVIDER=openai`.
+- Claude calls have a wall-clock watchdog and R1 writes live subtask telemetry
+  to `out/<slug>/_debug/r1/r1-status.json`.
+
+## Quick Start
 
 ```bash
-# 1. 配置 RootData API 密钥（可选，启用 Round 2 对账）
-cp .env.example .env
-# 编辑 .env，填入 ROOTDATA_API_KEY
+# Crawl one protocol into ./out/<slug>/
+./run.sh --display-name "Pendle"
 
-# 2. 运行
-./run.sh --display-name "Pendle" --type fixed_rate
+# Review current out/ data in the live browser.
+./run.sh browse
+
+# Batch crawl with RootData key rotation and i18n.
+ROOTDATA_API_KEYS=sk-a,sk-b \
+I18N_PROVIDER=openai \
+./run.sh --parallel 4 --i18n zh-cn,ja-jp \
+  --batch --display-name "Pendle" \
+  --batch --display-name "Morpho"
 ```
 
-未配置 `.env` 或 `ROOTDATA_API_KEY` 时，管线以单轮模式运行。
+## When To Use It
 
-## 用法
+Use this project when you need a repeatable research pipeline for protocol metadata:
+
+- Protocol description, tags, official website, X, and Discord links
+- Founding year
+- Public team members, roles, social links, and short bios
+- Funding rounds with investors, amount, valuation, and dates
+- Audit reports with auditor, scope, report URL, and scan timestamp
+- Provider, team member, and auditor logo URLs rewritten to stable OneKey CDN paths
+- Field-level findings, unresolved gaps, and R2 change audit trail
+- Optional localized output for the dashboard import flow
+
+It is not a fully automated publishing system. The crawler produces reviewable records; a human should still verify team, funding, and audit data before promoting records in production.
+
+## Install As A Claude Code Plugin
+
+Recommended installation:
+
+```text
+/plugin marketplace add labrinyang/protocol-info
+/plugin install protocol-info@labrinyang
+```
+
+Optional runtime configuration lives in `~/.config/protocol-info/.env` or
+`<repo>/.env`. Already-exported shell variables win; `.env` only fills missing
+values.
+
+RootData key lookup order:
+
+1. `--rootdata-key <key>` CLI flag (one-shot; never written to disk; comma/newline lists are allowed)
+2. `ROOTDATA_API_KEYS` or `ROOTDATA_API_KEY` exported in the calling shell
+3. `~/.config/protocol-info/.env` (recommended for plugin users — survives plugin updates)
+4. `<repo>/.env` (standalone CLI only; ignored when installed via the plugin cache)
+
+Persist a key for the plugin install:
 
 ```bash
-# 单个 provider（最少需要 --display-name 和 --type）
-./run.sh --display-name "f(x)Protocol" --type simple_earn
-
-# 可选参数：指定 slug、hints、rootdata-id
-./run.sh --display-name "Pendle" --type fixed_rate \
-         --slug pendle --hints "Yield trading protocol" --rootdata-id 874
-
-# 批量模式（用 --batch 分隔多组 provider）
-./run.sh \
-  --batch --display-name "Pendle" --type fixed_rate --slug pendle \
-  --batch --display-name "Morpho" --type simple_earn --slug morpho
-
-# 通用选项
-./run.sh --model sonnet --display-name "Pendle" --type fixed_rate
-./run.sh --max-turns 40 --display-name "Pendle" --type fixed_rate
-./run.sh --max-budget 2.00 --display-name "Pendle" --type fixed_rate
-./run.sh --dry-run --display-name "Pendle" --type fixed_rate
+mkdir -p ~/.config/protocol-info
+echo "ROOTDATA_API_KEY=sk-..." > ~/.config/protocol-info/.env
+chmod 600 ~/.config/protocol-info/.env
 ```
 
-### 参数说明
-
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `--display-name` | 是 | Provider 显示名称 |
-| `--type` | 是 | 类型：`fixed_rate` / `simple_earn` / `staking` |
-| `--slug` | 否 | 自定义 slug，不传则从 display-name 自动生成 |
-| `--hints` | 否 | 给 Claude 的额外上下文提示 |
-| `--rootdata-id` | 否 | RootData 项目 ID，不传则自动通过 API 按名称搜索 |
-| `--batch` | 否 | 批量分隔符，每个 `--batch` 开始一组新的 provider 参数 |
-| `--model` | 否 | 指定 Claude 模型 |
-| `--max-turns` | 否 | 最大轮数（默认 40） |
-| `--max-budget` | 否 | 每个 provider 的 API 预算上限（默认 $2.00） |
-| `--dry-run` | 否 | 只打印 prompt，不调用 Claude |
-| `--translate` | 否 | 启用 i18n 翻译（schema 校验通过后，用 Haiku 翻译为 20 个 locale） |
-| `--translate-concurrency` | 否 | 翻译并发数（默认 6） |
-| `--translate-locales` | 否 | 逗号分隔的 locale 子集（默认全部 20 个） |
-
-## 管线概览
-
-```
-Round 1（Claude 网页抓取） ──┐
-                             ├── 等待 ── Round 2（对账） ── 后处理 ── 校验 ── [翻译]
-RootData API（并行）       ──┘
-```
-
-- **Round 1**: Claude 搜索网页，产出 protocol-info JSON。
-- **RootData API**（并行）: 获取结构化数据——团队、投资方、链接、成立年份——并评分候选成员。
-- **Round 2**: 恢复同一 Claude 会话，注入 API 证据。Claude 交叉验证并改进输出。
-- **后处理**: 应用已校验的 URL 覆盖，标准化日期。
-- **翻译**（`--translate`）: 将 `description`、`tags`、`memberPosition`、`oneLiner`、`fundingRounds[].round` 翻译为 20 个 locale。
-- 如果 API 不可用或无匹配结果，管线自动回退到 Round 1 输出。
-
-## 翻译已有 out 文件
-
-无需重跑 Round 1/2，可直接对已有 JSON 文件翻译：
+For concurrent batches, put multiple keys in the same config. RootData calls
+start from a random key and fall back across the pool when a key is rate-limited
+or fails:
 
 ```bash
-# 单个文件
-node translate.mjs out/<ts>/pendle.json
-
-# 指定 locale 子集
-node translate.mjs out/<ts>/pendle.json --locales zh-cn,ja-jp,ko-kr
-
-# 批量翻译所有已有文件
-for f in out/*/[a-z]*.json; do
-  node translate.mjs "$f" --concurrency 3
-done
+ROOTDATA_API_KEYS=sk-a,sk-b,sk-c
+# or:
+ROOTDATA_API_KEY_1=sk-a
+ROOTDATA_API_KEY_2=sk-b
 ```
 
-## 测试
+Or use it once without writing a file:
 
 ```bash
-./test/run-tests.sh                        # 单元测试（免费、快速）
-INTEGRATION=1 ./test/run-tests.sh          # 含真实 Haiku 调用（~$0.01）
+/protocol-info:protocol-info --rootdata-key sk-a,sk-b --display-name "Pendle"
 ```
 
-## 审核与导入
+The startup banner reports key count and source (`shell-env`, `--rootdata-key`, or the resolved `.env` path). Without RootData keys, the pipeline still works and simply skips RootData-backed evidence.
 
-1. 检查 `out/<run>/.logs/summary.tsv`。
-2. 对每个 `<slug>.json`: 验证成员、融资、审计信息。
-3. `out/<run>/` 下所有 `.json` 文件即为可导入数据（日志在 `.logs/` 子目录）。
-4. POST 到 `dashboard/v1/earn/protocol-info/import` 端点。
+Paid Unavatar key for member/auditor avatar rehosting:
 
-## Schema 约定
+```bash
+UNAVATAR_API_KEY=sk-...
+```
 
-- **`slug` == `provider`**（每个 provider 一条记录）。
-- **`status`** 始终为 `"draft"`，审核后通过 dashboard 提升状态。
-- **`provider`** 字段不再在脚本层面做 enum 硬编码校验，格式要求为 `^[a-z][a-z0-9-]*$`。
+`UNAVATAR_API_KEY` follows the same shell / `~/.config/protocol-info/.env` /
+`<repo>/.env` precedence as RootData. You can also pass
+`--unavatar-key <key>` for one run. Without it, the pipeline can still try
+Unavatar anonymously, but may hit public rate limits.
+
+Optional OpenAI-compatible LLM gateway for no-web stages:
+
+```bash
+I18N_PROVIDER=openai
+OPENAI_BASE_URL=https://llm.example.com/v1
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-5.5
+# Optional, enables cost accounting and --max-budget for external routes:
+OPENAI_INPUT_COST_PER_1M=1.25
+OPENAI_OUTPUT_COST_PER_1M=10
+```
+
+OpenAI-compatible config uses the same precedence model as RootData:
+
+1. One-shot CLI flags: `--openai-api-key`, `--openai-base-url`, `--openai-model`, `--openai-input-cost-per-1m`, `--openai-output-cost-per-1m`
+2. Already-exported shell variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, pricing vars
+3. `~/.config/protocol-info/.env` (recommended for plugin users)
+4. `<repo>/.env` (standalone CLI only)
+
+Example one-shot run:
+
+```bash
+./run.sh --openai-api-key sk-... \
+  --openai-base-url https://llm.example.com/v1 \
+  --openai-model gpt-5.5 \
+  --i18n all \
+  --display-name "Pendle"
+```
+
+`i18n` is the safest default external-LLM use. R2 and field analysis can also
+opt in with `R2_LLM_PROVIDER=openai` or `ANALYZE_LLM_PROVIDER=openai`; they use
+existing evidence and approved search channels, not Claude WebFetch/WebSearch.
+For R2, `R2_LLM_PROVIDER=openai` uses the evidence-only reconcile prompt.
+`--r2-routing external_first` or `R2_ROUTING=external_first` runs an external
+evidence-only R2 and fails closed when the deterministic gate rejects the
+result. `--r2-routing external_first_with_claude_fallback` or
+`R2_ROUTING=external_first_with_claude_fallback` runs the same external pass
+first, then falls back to Claude web reconcile when the gate rejects the result.
+`AUDIT_REPORTS_LLM_PROVIDER=openai` enables an external structured reading pass
+over fetched audit report text before R2; `REFRESH_AUDITS_LLM_PROVIDER=openai`
+is also allowed because audit report text is extracted deterministically before
+the model call and the refresh uses an evidence-only audits prompt. R1 and
+other refresh subtasks stay on Claude by policy unless the manifest explicitly
+opts them in.
+OpenAI-compatible gateway calls report `cost_usd: null` until pricing env vars
+are configured; with pricing, external routes can participate in `--max-budget`
+accounting. The startup banner reports OpenAI-compatible key/base/model/pricing
+sources without printing the API key.
+
+Long-running Claude invocations have a wall-clock watchdog so one stalled web
+research subtask cannot block the batch queue indefinitely. Defaults:
+
+```bash
+# 15 minutes by default; set to 0 only when deliberately disabling the watchdog.
+CLAUDE_TIMEOUT_MS=900000
+# Stage/provider-specific overrides are supported.
+R1_CLAUDE_TIMEOUT_MS=900000
+R2_CLAUDE_TIMEOUT_MS=1200000
+# R1 writes out/<slug>/_debug/r1/r1-status.json and emits progress heartbeats.
+R1_HEARTBEAT_MS=60000
+```
+
+After installation, you can call the slash command directly:
+
+```text
+/protocol-info:protocol-info --display-name "Pendle"
+/protocol-info:protocol-info --display-name "Pendle" --i18n all
+/protocol-info:protocol-info --parallel 4 --i18n zh-cn,ja-jp \
+  --batch --display-name "Pendle" \
+  --batch --display-name "Morpho"
+```
+
+You can also trigger the bundled skills with natural language, for example:
+
+- "Research Pendle protocol info and translate it into Chinese and Japanese."
+- "Batch crawl Morpho and Aave earn metadata without translation."
+- "Create protocol-info for Lido."
+- "Crawl protocol info for Morpho and translate to all locales."
+- "Translate the existing Pendle record into Japanese."
+- "Verify Pendle fundingRounds and apply the update."
+- "Keep crawling this backlog, but start the next protocol as soon as the
+  current background task finishes."
+
+The plugin exposes a user-facing `protocol-info-router` skill. It chooses among
+three model-only focused sub-skills, all dispatching to the existing
+`/protocol-info:protocol-info` slash command: `protocol-info-crawler` for new
+crawls, `protocol-info-maintainer` for existing records, and
+`protocol-info-batch-operator` for long-running queues. The focused sub-skills
+are hidden from the `/` menu with `user-invocable: false` so the skill list stays
+centered on the router without shadowing the slash command.
+
+## Use As A Standalone CLI
+
+Clone the repository and run the shim:
+
+```bash
+./run.sh --display-name "Pendle"
+```
+
+`run.sh` only loads environment variables and delegates to `framework/cli.mjs`. It fills missing environment variables in this order:
+
+1. Already-exported shell environment variables
+2. `~/.config/protocol-info/.env`
+3. `<repo>/.env`
+
+Required local tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `claude` CLI | Headless Claude calls |
+| `node` >= 18 | Pipeline runtime |
+
+## Common Commands
+
+Single protocol:
+
+```bash
+./run.sh --display-name "f(x)Protocol"
+```
+
+Specify slug, RootData ID, or research hints:
+
+```bash
+./run.sh --display-name "Pendle" \
+  --slug pendle \
+  --rootdata-id 874 \
+  --hints "Yield trading protocol with PT/YT markets"
+```
+
+Batch run:
+
+```bash
+./run.sh --parallel 4 \
+  --batch --display-name "Pendle" \
+  --batch --display-name "Morpho" \
+  --batch --display-name "Aave"
+```
+
+i18n:
+
+```bash
+./run.sh --display-name "Pendle" --i18n all
+./run.sh --display-name "Pendle" --i18n zh-cn,ja-jp,en-us
+./run.sh --display-name "Pendle" --i18n none
+```
+
+OpenAI-compatible no-web routes:
+
+```bash
+I18N_PROVIDER=openai ./run.sh --display-name "Pendle" --i18n all
+R2_ROUTING=external_first_with_claude_fallback ./run.sh --display-name "Pendle"
+R2_LLM_PROVIDER=openai ./run.sh --display-name "Pendle"
+```
+
+Workflow commands on an existing `out/<slug>/`:
+
+```bash
+./run.sh get pendle description
+./run.sh set pendle description '"Updated source-language description"'
+./run.sh analyze pendle fundingRounds --query "verify latest funding rounds"
+./run.sh analyze pendle fundingRounds --query "verify latest funding rounds" --llm-provider openai --apply
+./run.sh i18n pendle --locales zh-cn,ja-jp
+./run.sh i18n pendle --locales zh-cn,ja-jp --fields members[].oneLiner
+./run.sh i18n --batch pendle morpho aave --locales all --parallel-slugs 4 --i18n-parallel 8
+./run.sh export-imports --out Aimports --combined
+./run.sh promote pendle active
+./run.sh refresh pendle audits --llm-provider openai
+./run.sh history pendle
+./run.sh diff pendle
+./run.sh restore pendle <sha>
+./run.sh restore-sidecars pendle
+```
+
+Write commands normalize deterministic fields, validate the full record,
+invalidate stale i18n artifacts when source fields change, run post-processing
+so `record.import.json` stays aligned, create one scoped local git commit in
+`out/`. The live browser reads the updated `out/` tree directly. `analyze` without `--apply` is
+proposal-only and writes nothing. Workflow commands can use one-shot
+`--openai-*` config flags; `analyze` and `refresh` also accept
+`--llm-provider openai`. External refresh is policy-allowed for `audits`; other
+refresh subtasks stay on Claude unless the manifest opts them in.
+
+Dry run:
+
+```bash
+./run.sh --dry-run --display-name "Pendle"
+```
+
+## CLI Flags
+
+| Flag | Required | Description |
+| --- | --- | --- |
+| `--display-name <name>` | Yes | Protocol display name. |
+| `--slug <slug>` | No | Business key. Defaults to a slugified display name. |
+| `--hints <text>` | No | Extra research context passed to Claude. |
+| `--rootdata-id <int>` | No | RootData project ID. If omitted, the fetcher searches by name when `ROOTDATA_API_KEY` is set. |
+| `--batch` | No | Flushes the current provider and starts another one. |
+| `--model <name>` | No | Override model for R1 and R2. Manifest default: `claude-sonnet-4-6`. |
+| `--rootdata-key <key>` | No | RootData API key for this run; overrides shell env and `.env` files. Never persisted. |
+| `--unavatar-key <key>` | No | Paid Unavatar API key for this run; overrides shell env and `.env` files. Never persisted. |
+| `--openai-api-key <key>` | No | OpenAI-compatible API key for this run; overrides shell env and `.env` files. Never persisted. |
+| `--openai-base-url <url>` | No | OpenAI-compatible base URL for this run. |
+| `--openai-model <name>` | No | Model for OpenAI-compatible i18n/R2/analyze/refresh routes. |
+| `--openai-input-cost-per-1m <usd>` | No | External input-token price per 1M tokens, used for cost reporting and `--max-budget`. |
+| `--openai-output-cost-per-1m <usd>` | No | External output-token price per 1M tokens, used for cost reporting and `--max-budget`. |
+| `--max-turns <n>` | No | Per-Claude-call turn cap; clamps manifest defaults down. |
+| `--max-budget <usd>` | No | Total single-provider LLM budget cap. The orchestrator splits it across R1, R2, and i18n. |
+| `--r2-routing <mode>` | No | R2 route. Default `single_provider`; `external_first` tries OpenAI-compatible evidence reconcile and fails closed on gate rejection; `external_first_with_claude_fallback` falls back to Claude web reconcile. |
+| `--parallel <n>` | No | Number of providers to run concurrently. Default: `1`. |
+| `--i18n <flag>` | No | `none`, `all`, or comma-separated locale codes such as `zh-cn,ja-jp`. Empty means silent skip. |
+| `--i18n-parallel <n>` | No | Locale translation concurrency. Default: `8`. |
+| `--i18n-model <name>` | No | Override i18n model. Manifest default: `claude-haiku-4-5-20251001`. |
+| `--dry-run` | No | Print resolved providers and stop. Forces `--parallel 1`. |
+| `--force-overwrite` | No | Overwrite a protocol directory that has uncommitted edits. Without this, v2 refuses to clobber manual changes. |
+| `--manifest <path>` | No | Advanced: run a different consumer manifest. |
+
+`record.type` is not a CLI input. The metadata subtask infers it from evidence.
+
+## Workflow Commands
+
+These commands operate on the canonical `out/<slug>/record.json` created by a
+previous crawl. They do not create a second displayed copy of the protocol;
+history and rollback are handled by the nested git repo under `out/`.
+
+| Command | Writes? | Purpose |
+| --- | --- | --- |
+| `get <slug> <jsonpath>` | No | Print one value as JSON. |
+| `set <slug> <jsonpath> <json>` | Yes | Manually replace one value, validate, post-process, commit. |
+| `analyze <slug> <jsonpath> --query <text>` | No | Research one field and print a proposed value with evidence. |
+| `analyze <slug> <jsonpath> --query <text> --apply` | Yes | Apply the proposal at the same path, validate, post-process, commit. |
+| `i18n <slug> [--locales LIST]` | Yes | Add missing locale sidecars, preserve existing translations, regenerate export files. |
+| `i18n <slug> [--locales LIST] --force` | Yes | Re-translate the requested locales and replace their existing sidecars. |
+| `i18n <slug> [--locales LIST] --fields <path,path>` | Yes | Translate only selected manifest translatable fields, deep-merge them into existing sidecars, and store source hashes for unchanged-field skips. |
+| `i18n --batch <slug...> [--locales LIST] [--parallel-slugs N] [--i18n-parallel N]` | Yes | Run i18n across multiple slugs; each slug commits independently and writes a batch summary under `out/.runs/`. |
+| `export-imports --out <dir> [--combined]` | Yes | Copy valid per-slug `record.import.json` files to a flat import folder and optionally write `combined.import.json`. |
+| `promote <slug> <active|archived>` | Yes | Validate lifecycle transition, then reuse the `set status` validation/post/commit path. |
+| `refresh <slug> <metadata|team|funding|audits>` | Yes | Re-run one broad R1 subtask and merge through the audit-first guard. |
+| `history <slug> [--limit N]` | No | Show local git history for one protocol. |
+| `diff <slug> [from] [to]` | No | Show a unified diff for one protocol. With no refs, compares that slug's latest two commits. |
+| `restore <slug> <sha>` | Yes | Restore a previous valid version, post-process, commit. |
+| `restore-sidecars <slug>` | Yes | Recreate ignored `_debug/i18n/` sidecars from `record.full.json`. |
+
+Promotion rules are deliberately narrow: `draft -> active`, `draft -> archived`, `active -> archived`, and `archived -> active`. `promote` is a no-op when the record is already at the requested status.
+
+## Output Layout
+
+Each protocol writes its canonical artifacts under:
+
+```text
+out/<slug>/
+```
+
+`out/` is a local git repo. Each successful crawl creates one commit for the
+changed protocol directories, with the batch run id stored as a `Run-Id:` git
+trailer. Batch scratch files are written under:
+
+```text
+out/.runs/<run-id>/
+```
+
+Review output with the live out browser:
+
+```bash
+./run.sh browse
+# or:
+node framework/out-browser.mjs --out ./out --port 8765
+```
+
+The browser server reads the current `out/` tree on every API request and the
+page polls it automatically, so edits to `out/<slug>/record.json` show up
+without regenerating HTML. It lets you filter protocols, inspect artifacts,
+review per-protocol changes, check logo asset coverage, open protocol/logo
+folders in Finder, copy one merged import JSON for the visible records, and
+copy a TSV summary for the visible records. The browser is desktop-first; it
+keeps the review queue, detail pane, and workspace actions visible together.
+Record counts are computed from the current `record.json` so they stay accurate even when a
+per-slug `summary.tsv` is absent, and the live queue polls the output tree every
+750 ms while the page is open. JSON artifacts show shape/key chips, syntax
+highlighting, raw copy, path copy, Finder reveal, direct file links, and a
+taller reader that can use the page's vertical scroll for long artifacts. Diffs are shown as
+colored per-line commit diffs with copy support. Its detail pane has five
+modes:
+
+- `Artifacts` — preview/copy `record.json`, `record.import.json`, `record.full.json`, findings, gaps, changes, and meta files, with JSON-oriented inspection controls.
+- `Preview` — render `record.json` as a protocol-info UI preview with overview, tags, links, team, funding, and audit sections.
+- `i18n` — switch between source and translated locales, compare translated fields against the source text, and copy the selected merged locale record.
+- `Changes` — view the slug-scoped local git history plus latest diff stats and a colored unified diff.
+- `Logos` — inspect provider, member, and audit logo assets, including whether the local file exists under the uploadable logo folders.
+
+It serves only review artifacts; raw Claude/debug logs stay under `_debug/`.
+
+![Live out browser — protocol review console with artifacts, preview, i18n, changes, logos, and Finder shortcuts](docs/images/out-browser.png)
+
+Typical files:
+
+| File | Purpose |
+| --- | --- |
+| `record.json` | Source-language `EarnProtocolInfo` record that passed schema validation. Review/audit file, not the dashboard import envelope. |
+| `record.full.json` | Inline i18n version, present only when translations were generated. |
+| `record.import.json` | Dashboard import envelope: `{ version, exportedAt, data: [...] }`. Use this for import. `sources` is stripped. |
+| `findings.json` | Field-level evidence with source URLs and confidence. |
+| `gaps.json` | Unresolved or weak fields, including attempted search paths. |
+| `changes.json` | R2 reconciliation changes and reasons. |
+| `meta.json` | Run status, RootData usage, budget plan, R1/R2 telemetry, i18n status. |
+| `summary.tsv` | Per-protocol generated summary row for the local browser. Gitignored. |
+| `_debug/` | Raw envelopes, stderr logs, intermediate evidence, i18n sidecars, and live R1 status. |
+| `_debug/r1/r1-status.json` | Live R1 scheduler status with queued/running/ok/failed counts, subtask pid, elapsed time, timeout, and error kind. |
+| `../protocol-logo/` | Provider/protocol logos referenced by `providerLogoUrl`. Upload this folder to `/static/logo/protocol-logo/`. |
+| `../protocol-member-logo/` | Team member logos referenced by `members[].avatarUrl`. Upload this folder to `/static/logo/protocol-member-logo/`. |
+| `../audit-logo/` | Auditor logos referenced by `audits.items[].auditorLogoUrl`. Upload this folder to `/static/logo/audit-logo/`. |
+
+The batch summary is:
+
+```text
+out/.runs/<run-id>/summary.tsv
+```
+
+### Upgrading from 1.x
+
+v2.0 changed the output layout from `out/<runId>/<slug>/` to `out/<slug>/`, and `out/` is now a local git repo (`out/.git/`). Each successful crawl is one commit; `out/.runs.log` tracks batch metadata.
+
+If you have existing v1.x output:
+- Old `out/<runId>/<slug>/` directories are left untouched but no longer surfaced in the browser. Remove them when you're ready: `rm -rf out/2026*/` (the run-id format).
+- Your records start fresh on the new flat layout.
+- Manually-edited records: if you've hand-edited a `record.json` between crawls, v2.0 will refuse to overwrite it. Commit your edits inside `out/` (`cd out && git add . && git commit -m "manual edits"`) or pass `--force-overwrite` to discard them.
+
+## Pipeline
+
+```text
+R0 fetch
+  RootData + DeFiLlama evidence
+        |
+        v
+R1 fan-out
+  metadata / team / funding / audits
+        |
+        v
+Merge slices + evidence diff
+        |
+        v
+R2 audit-first reconcile
+  optional RootData search channel
+  + extracted audit report text
+        |
+        v
+Normalize + schema validate
+        |
+        v
+Optional i18n
+        |
+        v
+Post-process dashboard export
+```
+
+### R0 fetch
+
+Fetchers gather structured evidence before Claude synthesis. RootData requires `ROOTDATA_API_KEY`; DeFiLlama is keyless. Missing optional fetchers do not fail the run.
+
+### R1 fan-out
+
+Four independent Claude subtasks run against schema slices:
+
+- `metadata`
+- `team`
+- `funding`
+- `audits`
+
+Each subtask returns:
+
+```json
+{
+  "slice": {},
+  "findings": [],
+  "gaps": [],
+  "handoff_notes": []
+}
+```
+
+### R2 reconcile
+
+R2 merges R1 slices and evidence with an audit-first policy:
+
+- High-confidence R1 fields are not overwritten by uncited R2 changes.
+- R2 can add missing fields when it has cited evidence.
+- Audit `reportUrl` PDF/HTML pages discovered by R1 are downloaded and text-extracted before R2. GitHub blob links are tried as raw report URLs first. When `AUDIT_REPORTS_LLM_PROVIDER=openai` is configured, the fetched report text is also sent through an external structured reading pass; the resulting `audit_reports` evidence helps verify audit dates, scopes, auditors, and report URLs.
+- Claude R2 uses the web reconcile prompt and can perform fresh WebFetch/WebSearch. OpenAI-compatible R2 uses an evidence-only prompt. With `external_first`, the external result must pass schema validation, merge-guard checks, and high-risk change checks before it is accepted; otherwise R2 fails closed. With `external_first_with_claude_fallback`, Claude R2 reruns from the original R1 record plus any enriched search evidence when the external result is rejected.
+- Search requests are limited and routed through approved fetcher search channels.
+- Every accepted change is recorded in `changes.json`.
+
+### Normalize And Validate
+
+Consumer normalizers apply deterministic fixes:
+
+- `rootdata-avatar` — `members[].avatarUrl` is filled after R2. Existing OneKey member-avatar CDN paths are preserved; otherwise RootData project member candidates are matched by exact name first. If the project-scoped candidates miss a verified member, the normalizer searches RootData people directly by `memberName` and requires the result bio to mention the protocol. Paid Unavatar from verified X/LinkedIn links or handle-like pseudonyms is the final fallback. `pbs.twimg.com` temp signed URLs are rejected. The team subtask still emits `null`; `logo-assets` downloads the source image and rewrites the final JSON to the OneKey CDN.
+- `logo-assets` — downloads/rehosts logo fields into shared folders under `out/` and rewrites JSON to `https://uni.onekey-asset.com/static/logo/...`:
+  - `providerLogoUrl` → `out/protocol-logo/`
+  - `members[].avatarUrl` → `out/protocol-member-logo/`
+  - `audits.items[].auditorLogoUrl` → `out/audit-logo/`
+  Filenames are deterministic: provider logos use `<slug>.<ext>`, member logos use `<slug>-<member-name>.<ext>`, and audit logos use `<auditor>.<ext>`, with names lowercased and punctuation collapsed to `-`. Existing local files are reused, so repeated refreshes do not re-download the same logo. Audit firm logos prefer the current record value, then existing local files and `out/*/record.json` records; if missing, the normalizer performs an exact RootData project search and rehosts the RootData `logo` value. If RootData's exact audit-firm match exposes a GitHub link but no logo, the normalizer can fetch the GitHub organization avatar through paid Unavatar and rehost it.
+- `protocol-info-final` — sets `audits.lastScannedAt` to UTC today and removes placeholder `members[].oneLiner` text by setting it to `null`.
+
+The final `record.json` must pass `consumers/protocol-info/schemas/full.json`.
+
+### i18n And Export
+
+If `--i18n` is set, the configured i18n provider translates fields from the manifest. By default this is Claude Haiku; set `I18N_PROVIDER=openai` plus OpenAI-compatible config to use an external gateway instead. You can provide that config with one-shot `--openai-*` flags, exported shell env, `~/.config/protocol-info/.env`, or `<repo>/.env`, in that order. Add `OPENAI_INPUT_COST_PER_1M` and `OPENAI_OUTPUT_COST_PER_1M` or their matching CLI flags when combining OpenAI-compatible i18n with `--max-budget`.
+
+- `description`
+- `members[].memberPosition`
+- `members[].oneLiner`
+
+Then post-processing writes:
+
+- `record.full.json` for inline preview
+- `record.import.json` for dashboard import
+
+## Schema Summary
+
+The main schema is `consumers/protocol-info/schemas/full.json`.
+
+Top-level fields:
+
+```json
+{
+  "slug": "pendle",
+  "provider": "pendle",
+  "providerLogoUrl": "https://uni.onekey-asset.com/static/logo/protocol-logo/pendle.png",
+  "displayName": "Pendle",
+  "type": "fixed_rate",
+  "description": "...",
+  "tags": ["yield", "fixed-rate"],
+  "establishment": 2021,
+  "members": [
+    {
+      "memberName": "Example Member",
+      "memberPosition": "Co-Founder",
+      "oneLiner": "Previously built DeFi infrastructure.",
+      "avatarUrl": "https://uni.onekey-asset.com/static/logo/protocol-member-logo/pendle-example-member.png",
+      "memberLink": {
+        "xLink": "https://x.com/example",
+        "linkedinLink": null
+      }
+    }
+  ],
+  "providerWebsite": "https://...",
+  "providerXLink": "https://...",
+  "providerDiscordLink": null,
+  "status": "draft",
+  "fundingRounds": [],
+  "audits": {
+    "items": [
+      {
+        "auditor": "OpenZeppelin",
+        "auditorLogoUrl": "https://uni.onekey-asset.com/static/logo/audit-logo/openzeppelin.png",
+        "date": "2024-05",
+        "scope": "Core protocol contracts",
+        "reportUrl": "https://..."
+      }
+    ],
+    "lastScannedAt": "2026-04-27"
+  },
+  "sources": ["https://..."]
+}
+```
+
+Important constraints:
+
+- `type`: `fixed_rate`, `simple_earn`, or `staking`
+- `status`: crawler output should be `draft`
+- `members`: at least one entry
+- `members[].oneLiner`: concrete verified background or `null`; placeholder text such as `Unverified`, `TBD`, `N/A`, or `暂未提供` is normalized back to `null`
+- `providerLogoUrl`, `members[].avatarUrl`, and `audits.items[].auditorLogoUrl`: absolute URLs or `null`; when found, the normalizer rewrites them to `https://uni.onekey-asset.com/static/logo/...`. Member avatars use RootData first, then direct RootData person search, then paid Unavatar from verified social links or handle-like pseudonyms. Audit logos prefer current/manual values, then local cache/cross-protocol records, then exact RootData project search, with RootData GitHub links as a paid Unavatar fallback.
+- `fundingRounds`: full funding history, newest first
+- `audits.items[].date`: `YYYY-MM` or `YYYY-MM-DD`; bare years are invalid
+- URL fields must be absolute URIs or `null` when nullable
+- `sources` is an audit trail and is stripped from `record.import.json`
+
+## Supported Locales
+
+`record.import.json` uses these dashboard locale keys. `en` is the source-language fallback row; `--i18n all` translates the other 20 locales.
+
+| Code | Language |
+| --- | --- |
+| `en` | English (default fallback) |
+| `en-us` | English (United States) |
+| `zh-cn` | Simplified Chinese (Mainland China) |
+| `zh-tw` | Traditional Chinese (Taiwan) |
+| `zh-hk` | Traditional Chinese (Hong Kong) |
+| `ja-jp` | Japanese |
+| `ko-kr` | Korean |
+| `fr-fr` | French |
+| `de` | German |
+| `es` | Spanish |
+| `it-it` | Italian |
+| `pt-br` | Portuguese (Brazil) |
+| `pt` | Portuguese |
+| `ru` | Russian |
+| `uk-ua` | Ukrainian |
+| `ar` | Arabic |
+| `hi-in` | Hindi |
+| `bn` | Bengali |
+| `vi` | Vietnamese |
+| `th-th` | Thai |
+| `id` | Indonesian |
+
+## Review And Import
+
+Recommended review flow:
+
+1. Run `./run.sh browse` and open the printed local URL, or inspect `out/.runs/<run-id>/summary.tsv`.
+2. For each `OK` row, review `out/<slug>/record.json`.
+3. In the `Logos` panel, confirm provider, member, and auditor logos exist locally before uploading the logo folders.
+4. Check `findings.json` for source coverage.
+5. Check `gaps.json` for missing or weak fields.
+6. Check `changes.json` when R2 changed R1 output.
+7. Import `record.import.json` after review.
+
+Example import:
+
+```bash
+curl -X POST "$DASHBOARD/api/earn-protocol-info/import" \
+  -H "Content-Type: application/json" \
+  -d @out/<slug>/record.import.json
+```
+
+Even without i18n, `record.import.json` contains one source-language record with dashboard locale `en`.
+
+## Troubleshooting
+
+### `claude CLI not found`
+
+Install Claude Code and ensure `claude` is on `PATH`, or set `CLAUDE_BIN`:
+
+```bash
+CLAUDE_BIN=/path/to/claude ./run.sh --display-name "Pendle"
+```
+
+### RootData is disabled
+
+Pass `--rootdata-key sk-a,sk-b` for a one-shot run, export `ROOTDATA_API_KEYS` / `ROOTDATA_API_KEY` in your shell, or write it to `~/.config/protocol-info/.env` (preferred) or `<repo>/.env`. The startup banner shows key count and source. Without a key, RootData fetch and search channels are skipped. Paid Unavatar uses `--unavatar-key` or `UNAVATAR_API_KEY` from the same config locations.
+
+### `SCHEMA_FAIL`
+
+Open the protocol directory and inspect:
+
+- `record.json`
+- `gaps.json`
+- `changes.json`
+- `_debug/schema.stderr.log` if present
+
+Common causes are invalid URLs, missing required members, incomplete dates, or audit dates with bare years.
+
+### Partial i18n success
+
+The summary column may show values such as `3/20`. Inspect:
+
+```text
+out/<slug>/_debug/i18n/
+```
+
+Successful locale sidecars are still used by post-processing.
+
+`i18n <slug> --locales ...` is incremental by default: existing locales are
+kept, missing locales are translated, and `record.full.json` is used to restore
+ignored `_debug/i18n/` sidecars when needed. Use `--force` to re-translate a
+locale that already exists.
+
+Use `--fields` when only one translatable field changed, for example:
+
+```bash
+./run.sh i18n pendle --locales zh-cn,ja-jp --fields members[].oneLiner
+```
+
+The command validates field names against `manifest.i18n.translatable_fields`,
+prompts the model with only that subset, deep-merges the result into existing
+sidecars, and stores source hashes under `_debug/i18n-meta/source-hashes.json`
+so unchanged fields can be skipped later. If `_debug/i18n/` was cleaned, run
+`./run.sh restore-sidecars <slug>` to recover sidecars from `record.full.json`.
+
+### R1 appears stuck
+
+R1 writes live scheduler telemetry while the run is still active:
+
+```bash
+jq . out/<slug>/_debug/r1/r1-status.json
+tail -f out/<slug>/_debug/r1.stderr.log
+```
+
+`r1-status.json` shows each subtask's `state`, `pid`, `elapsed_ms`,
+`timeout_ms`, and `error_kind`. Claude calls default to a 15-minute wall-clock
+watchdog; tune it with `CLAUDE_TIMEOUT_MS` or `R1_CLAUDE_TIMEOUT_MS`. Set the
+value to `0` only when deliberately disabling the watchdog.
+
+### Output path changed
+
+The current layout is protocol-first:
+
+```text
+out/<slug>/
+out/.runs/<run-id>/summary.tsv
+```
+
+Older docs or generated paths using `out/<run-id>/<slug>/` are stale.
+
+## Development
+
+Run all local checks:
+
+```bash
+node scripts/check-all.mjs
+```
+
+Validate the Claude Code plugin:
+
+```bash
+claude plugin validate .
+```
+
+The framework is intentionally consumer-oriented. To add another consumer, provide a manifest, full schema, slice schemas, prompts, and optional fetchers, normalizers, and post-processing modules. The shared framework handles scheduling, budget splitting, evidence merging, validation, i18n, and summaries.

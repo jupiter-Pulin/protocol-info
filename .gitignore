@@ -3,4 +3,3 @@ out/
 .claude_review_state.json
 .claude/
 .env
-logs/

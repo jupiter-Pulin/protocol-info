@@ -1,0 +1,160 @@
+{
+  "name": "protocol-info",
+  "version": "2.4.2",
+  "model_default": "claude-sonnet-4-6",
+  "llm": {
+    "providers": {
+      "claude": {
+        "capabilities": ["structured_json", "web_fetch", "web_search"]
+      },
+      "openai": {
+        "capabilities": ["structured_json"],
+        "pricing": {
+          "source": "env",
+          "input_env": "OPENAI_INPUT_COST_PER_1M",
+          "output_env": "OPENAI_OUTPUT_COST_PER_1M"
+        }
+      }
+    },
+    "stages": {
+      "r1": {
+        "allowed_providers": ["claude"],
+        "required_capabilities": ["structured_json", "web_fetch", "web_search"]
+      },
+      "r2": {
+        "allowed_providers": ["claude", "openai"],
+        "required_capabilities": ["structured_json"]
+      },
+      "analyze": {
+        "allowed_providers": ["claude", "openai"],
+        "required_capabilities": ["structured_json"]
+      },
+      "refresh": {
+        "allowed_providers": ["claude"],
+        "required_capabilities": ["structured_json", "web_fetch", "web_search"]
+      },
+      "refresh:audits": {
+        "allowed_providers": ["claude", "openai"],
+        "required_capabilities": ["structured_json"]
+      },
+      "i18n": {
+        "allowed_providers": ["claude", "openai"],
+        "required_capabilities": ["structured_json"]
+      }
+    }
+  },
+  "schemas": { "full": "./schemas/full.json" },
+  "fetchers": [
+    { "name": "rootdata", "module": "./fetchers/rootdata.mjs", "required_env": ["ROOTDATA_API_KEY"], "optional": true, "search": { "enabled": true, "types": ["project", "person"], "max_queries_per_round": 4 } },
+    { "name": "defillama", "module": "./fetchers/defillama.mjs", "required_env": [], "optional": true }
+  ],
+  "system_prompt": "./prompts/system.md",
+  "reconcile": {
+    "enabled": true,
+    "prompt": "./prompts/reconcile.user.md.tmpl",
+    "evidence_prompt": "./prompts/reconcile.evidence.user.md.tmpl",
+    "max_turns": 30,
+    "max_budget_usd": 1.50,
+    "mode": "deep",
+    "max_research_rounds": 2,
+    "max_search_queries_per_round": 4,
+    "fast_skip_allowed": false
+  },
+  "i18n": {
+    "enabled": true,
+    "model_default": "claude-haiku-4-5-20251001",
+    "max_budget_usd_per_call": 0.10,
+    "system_prompt": "./prompts/i18n.system.md",
+    "user_prompt": "./prompts/i18n.user.md.tmpl",
+    "schema": "./schemas/i18n.json",
+    "translatable_fields": ["description", "members[].memberPosition", "members[].oneLiner"],
+    "field_caps": {
+      "description": { "maxLength": 1000 },
+      "members[].memberPosition": { "maxLength": 80 },
+      "members[].oneLiner": { "maxLength": 140 }
+    },
+    "locale_catalog": [
+      { "code": "en_US", "name_zh": "英语（美国）", "name_en": "English (United States)" },
+      { "code": "zh_CN", "name_zh": "简体中文（中国大陆）", "name_en": "Simplified Chinese (Mainland China)" },
+      { "code": "zh_TW", "name_zh": "繁体中文（台湾）", "name_en": "Traditional Chinese (Taiwan)" },
+      { "code": "zh_HK", "name_zh": "繁体中文（香港）", "name_en": "Traditional Chinese (Hong Kong)" },
+      { "code": "ja_JP", "name_zh": "日语", "name_en": "Japanese" },
+      { "code": "ko_KR", "name_zh": "韩语", "name_en": "Korean" },
+      { "code": "fr_FR", "name_zh": "法语", "name_en": "French" },
+      { "code": "de", "name_zh": "德语", "name_en": "German" },
+      { "code": "es", "name_zh": "西班牙语", "name_en": "Spanish" },
+      { "code": "it_IT", "name_zh": "意大利语", "name_en": "Italian" },
+      { "code": "pt_BR", "name_zh": "葡萄牙语（巴西）", "name_en": "Portuguese (Brazil)" },
+      { "code": "pt", "name_zh": "葡萄牙语", "name_en": "Portuguese" },
+      { "code": "ru", "name_zh": "俄语", "name_en": "Russian" },
+      { "code": "uk_UA", "name_zh": "乌克兰语", "name_en": "Ukrainian" },
+      { "code": "ar", "name_zh": "阿拉伯语", "name_en": "Arabic" },
+      { "code": "hi_IN", "name_zh": "印地语", "name_en": "Hindi" },
+      { "code": "bn", "name_zh": "孟加拉语", "name_en": "Bengali" },
+      { "code": "vi", "name_zh": "越南语", "name_en": "Vietnamese" },
+      { "code": "th_TH", "name_zh": "泰语", "name_en": "Thai" },
+      { "code": "id", "name_zh": "印尼语", "name_en": "Indonesian" }
+    ]
+  },
+  "post_processing": [
+    {
+      "name": "dashboard-export",
+      "module": "./post/dashboard-export.mjs",
+      "config": {
+        "envelope_version": "1.0",
+        "source_locale_dashboard_code": "en",
+        "strip_fields": ["sources", "i18nGlossary"]
+      }
+    }
+  ],
+  "output": {
+    "record_filename": "record.json",
+    "findings_filename": "findings.json",
+    "changes_filename": "changes.json",
+    "gaps_filename": "gaps.json",
+    "meta_filename": "meta.json",
+    "full_filename": "record.full.json",
+    "import_filename": "record.import.json",
+    "debug_dir": "_debug"
+  },
+  "normalizers": [
+    { "name": "rootdata-avatar", "module": "./normalizers/rootdata-avatar.mjs" },
+    { "name": "logo-assets", "module": "./normalizers/logo-assets.mjs" },
+    { "name": "protocol-info-final", "module": "./normalizers/final.mjs" }
+  ],
+  "subtasks": [
+    {
+      "name": "metadata",
+      "prompt": "./prompts/metadata.user.md.tmpl",
+      "schema_slice": "./schemas/metadata.slice.json",
+      "max_turns": 30,
+      "max_budget_usd": 1.50,
+      "evidence_keys": ["rootdata.anchors", "rootdata.provider_logo_url", "rootdata.validated_overrides", "defillama.category", "defillama.chains"]
+    },
+    {
+      "name": "team",
+      "prompt": "./prompts/team.user.md.tmpl",
+      "schema_slice": "./schemas/team.slice.json",
+      "max_turns": 40,
+      "max_budget_usd": 1.50,
+      "evidence_keys": ["rootdata.member_candidates"]
+    },
+    {
+      "name": "funding",
+      "prompt": "./prompts/funding.user.md.tmpl",
+      "schema_slice": "./schemas/funding.slice.json",
+      "max_turns": 30,
+      "max_budget_usd": 1.50,
+      "evidence_keys": ["rootdata.api_funding"]
+    },
+    {
+      "name": "audits",
+      "prompt": "./prompts/audits.user.md.tmpl",
+      "evidence_prompt": "./prompts/audits.evidence.user.md.tmpl",
+      "schema_slice": "./schemas/audits.slice.json",
+      "max_turns": 40,
+      "max_budget_usd": 1.50,
+      "evidence_keys": ["audit_reports.reports", "audit_reports.failures"]
+    }
+  ]
+}
